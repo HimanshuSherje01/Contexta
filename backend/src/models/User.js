@@ -19,13 +19,12 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: [true, "Password is required"],
       minlength: 6,
-      select: false, // never return password by default
+      select: false,
     },
   },
   { timestamps: true }
 );
 
-// Hash password before saving, only if it changed
 userSchema.pre("save", async function (next) {
   if (!this.isModified("password")) return next();
   const salt = await bcrypt.genSalt(10);
@@ -33,7 +32,6 @@ userSchema.pre("save", async function (next) {
   next();
 });
 
-// Instance method to check password on login
 userSchema.methods.matchPassword = async function (enteredPassword) {
   return bcrypt.compare(enteredPassword, this.password);
 };

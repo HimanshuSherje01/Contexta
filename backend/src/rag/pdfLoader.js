@@ -13,10 +13,16 @@ export const extractTextFromPDF = async (filePath) => {
 
         await parser.destroy();
 
+        const pageTexts = result.pages.map((page) => ({
+            page: page.num,
+            text: page.text.trim()
+        }));
+
         return {
-            text: result.text,
-            pages: result.total
+            pages: result.total,
+            pageTexts
         };
+
     } catch (error) {
         console.error("Error extracting PDF:", error);
         throw error;
