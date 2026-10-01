@@ -1,15 +1,41 @@
 import { useState, useRef, useEffect, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
-import Navbar from "../components/Navbar.jsx";
+import {
+  FileText,
+  UploadCloud,
+  Trash2,
+  Send,
+  Sparkles,
+  Bot,
+  User as UserIcon,
+  Layers,
+  ChevronDown,
+  ChevronUp,
+  CheckCircle2,
+  Clock,
+  AlertTriangle,
+  RotateCcw,
+  PanelLeftClose,
+  PanelLeftOpen,
+  LogOut,
+  AlertCircle,
+  HelpCircle,
+} from "lucide-react";
 import {
   uploadDocument,
   getDocuments,
   deleteDocument,
-  getDocumentById,
 } from "../api/documents.js";
 import { sendChatMessage } from "../api/chat.js";
+import { useAuth } from "../context/AuthContext.jsx";
+import ThemeToggle from "../components/ThemeToggle.jsx";
+import Modal from "../components/Modal.jsx";
 
 export default function Chat() {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+
   // Document Management States
   const [documents, setDocuments] = useState([]);
   const [selectedDocId, setSelectedDocId] = useState(null);
@@ -21,18 +47,24 @@ export default function Chat() {
   const [messages, setMessages] = useState([
     {
       role: "assistant",
-      text: "Welcome to PDF RAG Assistant! Please upload or select a PDF document from the sidebar to begin asking questions.",
+      text: "Welcome to **PDF RAG Assistant**! Please upload or select a PDF document from the sidebar to begin asking grounded questions.",
     },
   ]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [chatError, setChatError] = useState("");
 
+  // UI States
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [deleteModalDoc, setDeleteModalDoc] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+
   // Expandable sources tracker: map of messageIndex -> Set of expanded source indices
   const [expandedSources, setExpandedSources] = useState({});
 
   const fileInputRef = useRef(null);
   const bottomRef = useRef(null);
+  const textareaRef = useRef(null);
   const pollIntervalRef = useRef(null);
 
   // Auto-scroll chat to bottom
@@ -94,7 +126,10 @@ export default function Chat() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
+    if (
+      file.type !== "application/pdf" &&
+      !file.name.toLowerCase().endsWith(".pdf")
+    ) {
       setUploadError("Only PDF files (.pdf) are allowed.");
       return;
     }
@@ -127,20 +162,26 @@ export default function Chat() {
     }
   }
 
-  // Handle document deletion
-  async function handleDeleteDocument(docId, docName) {
-    const confirmDelete = window.confirm(
-      `Are you sure you want to delete "${docName}" and all of its indexed chunks?`
-    );
-    if (!confirmDelete) return;
+  // Open delete confirmation modal
+  function triggerDeletePrompt(doc) {
+    setDeleteModalDoc(doc);
+  }
 
+  // Execute confirmed document deletion
+  async function confirmDeleteDocument() {
+    if (!deleteModalDoc) return;
+    const docId = deleteModalDoc._id;
+    const docName = deleteModalDoc.originalName;
+
+    setDeleting(true);
     try {
       await deleteDocument(docId);
       setDocuments((prev) => prev.filter((d) => d._id !== docId));
 
       if (selectedDocId === docId) {
         const remaining = documents.filter((d) => d._id !== docId);
-        const nextDoc = remaining.find((d) => d.status === "ready") || remaining[0] || null;
+        const nextDoc =
+          remaining.find((d) => d.status === "ready") || remaining[0] || null;
         setSelectedDocId(nextDoc ? nextDoc._id : null);
       }
 
@@ -151,19 +192,22 @@ export default function Chat() {
           text: `🗑️ Document **${docName}** and its embeddings have been deleted.`,
         },
       ]);
+      setDeleteModalDoc(null);
     } catch (err) {
       alert(err.response?.data?.message || "Failed to delete document");
+    } finally {
+      setDeleting(false);
     }
   }
 
-  // Handle sending a chat message
-  async function handleSend(e) {
-    e.preventDefault();
-    const question = input.trim();
+  // Handle sending a chat message (supports form submit or quick chip click)
+  async function handleSend(e, questionOverride) {
+    if (e) e.preventDefault();
+    const question = (questionOverride || input).trim();
     if (!question || sending) return;
 
     if (!activeDoc) {
-      setChatError("Please select an uploaded document first.");
+      setChatError("Please select or upload a document first.");
       return;
     }
 
@@ -207,6 +251,14 @@ export default function Chat() {
     }
   }
 
+  // Handle Enter / Shift+Enter in input
+  function handleKeyDown(e) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSend(e);
+    }
+  }
+
   // Toggle snippet view
   function toggleSnippet(msgIdx, srcIdx) {
     setExpandedSources((prev) => {
@@ -220,8 +272,13 @@ export default function Chat() {
     });
   }
 
+  function handleLogout() {
+    logout();
+    navigate("/login");
+  }
+
   // Chat placeholder logic
-  let inputPlaceholder = "Ask something about the document...";
+  let inputPlaceholder = "Ask a question about this document... (Enter to send)";
   let isInputDisabled = sending;
 
   if (uploading) {
@@ -238,22 +295,109 @@ export default function Chat() {
     isInputDisabled = true;
   }
 
-  return (
-    <div className="flex h-screen flex-col bg-paper">
-      <Navbar />
+  const exampleQuestions = [
+    "What is a process?",
+    "What is PCB?",
+    "Explain process scheduling.",
+    "What are the process states?",
+  ];
 
-      {/* Main Container: Sidebar + Chat Area */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* ================= Document Sidebar ================= */}
-        <aside className="w-80 border-r border-line bg-white flex flex-col justify-between">
-          <div className="p-4 flex flex-col flex-1 overflow-hidden">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="font-serif text-base font-semibold text-ink">
-                Documents
-              </h2>
-              <span className="text-xs text-slate">
-                {documents.length} {documents.length === 1 ? "file" : "files"}
+  return (
+    <div className="flex h-screen flex-col bg-slate-50 dark:bg-dark-bg text-slate-900 dark:text-dark-text overflow-hidden transition-colors duration-200">
+      {/* ================= TOP NAVIGATION ================= */}
+      <header className="h-14 border-b border-slate-200 dark:border-dark-border bg-white dark:bg-dark-surface px-4 flex items-center justify-between shrink-0 z-20">
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+            className="rounded-lg p-1.5 text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-dark-card transition-colors"
+            title={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
+            aria-label="Toggle document sidebar"
+          >
+            {sidebarOpen ? (
+              <PanelLeftClose className="h-5 w-5" />
+            ) : (
+              <PanelLeftOpen className="h-5 w-5" />
+            )}
+          </button>
+
+          <div className="flex items-center gap-2">
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-tr from-brand-600 to-teal-400 text-white shadow-sm">
+              <FileText className="h-4 w-4" />
+            </div>
+            <span className="font-semibold text-sm tracking-tight text-slate-900 dark:text-white hidden sm:inline">
+              PDF RAG Assistant
+            </span>
+          </div>
+
+          {/* Active Document Indicator Pill in Header */}
+          {activeDoc && (
+            <div className="hidden md:flex items-center gap-2 rounded-full border border-slate-200 dark:border-dark-border bg-slate-100/70 dark:bg-dark-card px-3 py-1 text-xs">
+              <span
+                className={`h-2 w-2 rounded-full ${
+                  activeDoc.status === "ready"
+                    ? "bg-emerald-500"
+                    : activeDoc.status === "processing"
+                    ? "bg-amber-500 animate-pulse"
+                    : "bg-red-500"
+                }`}
+              />
+              <span className="font-medium text-slate-700 dark:text-slate-200 max-w-[200px] truncate">
+                {activeDoc.originalName}
               </span>
+              <span className="text-[10px] uppercase font-semibold text-slate-400">
+                {activeDoc.status}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Right Header Actions */}
+        <div className="flex items-center gap-3">
+          <ThemeToggle />
+
+          {user && (
+            <div className="flex items-center gap-3 pl-3 border-l border-slate-200 dark:border-dark-border">
+              <div className="flex items-center gap-2">
+                <div className="h-7 w-7 rounded-full bg-brand-600 text-white flex items-center justify-center text-xs font-bold uppercase shadow-sm">
+                  {user.name ? user.name.charAt(0) : "U"}
+                </div>
+                <span className="text-xs font-medium text-slate-700 dark:text-slate-300 hidden lg:inline">
+                  {user.name}
+                </span>
+              </div>
+
+              <button
+                onClick={handleLogout}
+                className="flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-dark-border px-2.5 py-1 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-dark-card hover:text-red-600 dark:hover:text-red-400 transition-colors"
+                title="Log out of your account"
+              >
+                <LogOut className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Log out</span>
+              </button>
+            </div>
+          )}
+        </div>
+      </header>
+
+      {/* ================= WORKSPACE BODY ================= */}
+      <div className="flex flex-1 overflow-hidden relative">
+        {/* ================= DOCUMENT SIDEBAR ================= */}
+        <aside
+          className={`${
+            sidebarOpen ? "w-80 translate-x-0" : "-translate-x-full md:w-0"
+          } fixed md:static inset-y-0 left-0 z-30 md:z-auto transition-all duration-300 ease-in-out border-r border-slate-200 dark:border-dark-border bg-white dark:bg-dark-surface flex flex-col justify-between shadow-xl md:shadow-none h-[calc(100vh-3.5rem)]`}
+        >
+          <div className="p-4 flex flex-col flex-1 overflow-hidden">
+            {/* Sidebar Title */}
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <h2 className="text-sm font-bold text-slate-900 dark:text-white uppercase tracking-wider">
+                  Documents
+                </h2>
+                <span className="rounded-full bg-slate-100 dark:bg-dark-card px-2 py-0.5 text-[11px] font-semibold text-slate-600 dark:text-slate-400">
+                  {documents.length}
+                </span>
+              </div>
             </div>
 
             {/* Upload Button */}
@@ -269,35 +413,44 @@ export default function Chat() {
               <button
                 onClick={() => fileInputRef.current?.click()}
                 disabled={uploading}
-                className="w-full flex items-center justify-center gap-2 rounded-md bg-accent py-2 text-sm font-medium text-white hover:bg-accentDark disabled:opacity-60 transition-colors"
+                className="w-full flex items-center justify-center gap-2 rounded-xl bg-brand-600 py-2.5 px-3 text-xs font-semibold text-white shadow-sm shadow-brand-600/20 hover:bg-brand-700 disabled:opacity-60 transition-all focus:outline-none focus:ring-2 focus:ring-brand-500/50"
               >
                 {uploading ? (
                   <>
-                    <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                    <span>Uploading...</span>
+                    <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                    <span>Uploading &amp; Indexing...</span>
                   </>
                 ) : (
                   <>
-                    <span className="text-lg leading-none">+</span>
-                    <span>Upload PDF</span>
+                    <UploadCloud className="h-4 w-4" />
+                    <span>Upload New PDF</span>
                   </>
                 )}
               </button>
               {uploadError && (
-                <p className="mt-2 text-xs text-red-600">{uploadError}</p>
+                <div className="mt-2 flex items-start gap-1.5 rounded-lg bg-red-50 dark:bg-red-950/40 p-2 text-[11px] text-red-600 dark:text-red-400 border border-red-200 dark:border-red-900/50">
+                  <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                  <span>{uploadError}</span>
+                </div>
               )}
             </div>
 
             {/* Document List */}
             <div className="flex-1 overflow-y-auto space-y-2 pr-1">
               {loadingDocs ? (
-                <p className="text-xs text-slate text-center py-4">
-                  Loading documents...
-                </p>
+                <div className="py-8 text-center text-xs text-slate-400 flex flex-col items-center gap-2">
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-brand-500 border-t-transparent" />
+                  <span>Loading documents...</span>
+                </div>
               ) : documents.length === 0 ? (
-                <div className="rounded-md border border-dashed border-line p-6 text-center text-xs text-slate">
-                  <p>No documents uploaded yet.</p>
-                  <p className="mt-1">Upload a PDF to start asking questions.</p>
+                <div className="rounded-xl border border-dashed border-slate-200 dark:border-dark-border p-6 text-center text-xs text-slate-500 dark:text-slate-400 flex flex-col items-center">
+                  <FileText className="h-8 w-8 text-slate-300 dark:text-slate-600 mb-2" />
+                  <p className="font-semibold text-slate-700 dark:text-slate-300">
+                    No documents yet
+                  </p>
+                  <p className="mt-1 text-[11px]">
+                    Upload a PDF to start asking grounded questions.
+                  </p>
                 </div>
               ) : (
                 documents.map((doc) => {
@@ -307,72 +460,100 @@ export default function Chat() {
                     <div
                       key={doc._id}
                       onClick={() => setSelectedDocId(doc._id)}
-                      className={`group relative rounded-lg border p-3 cursor-pointer transition-all ${
+                      className={`group relative rounded-xl border p-3 cursor-pointer transition-all duration-150 ${
                         isSelected
-                          ? "border-accent bg-accent/5 shadow-sm"
-                          : "border-line bg-white hover:bg-paper/50"
+                          ? "border-brand-500/80 bg-brand-50/50 dark:bg-brand-950/20 shadow-sm"
+                          : "border-slate-200 dark:border-dark-border bg-white dark:bg-dark-card hover:bg-slate-50 dark:hover:bg-dark-cardHover"
                       }`}
                     >
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="flex-1 min-w-0">
-                          <p
-                            className={`truncate text-sm font-medium ${
-                              isSelected ? "text-accentDark font-semibold" : "text-ink"
+                      <div className="flex items-start justify-between gap-2.5">
+                        <div className="flex items-start gap-2.5 min-w-0 flex-1">
+                          <div
+                            className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${
+                              isSelected
+                                ? "bg-brand-100 dark:bg-brand-900/60 text-brand-700 dark:text-brand-300"
+                                : "bg-slate-100 dark:bg-dark-surface text-slate-500 dark:text-slate-400"
                             }`}
-                            title={doc.originalName}
                           >
-                            {doc.originalName}
-                          </p>
+                            <FileText className="h-4 w-4" />
+                          </div>
 
-                          <div className="mt-1 flex items-center gap-2 text-xs text-slate">
-                            <span>{(doc.fileSize / 1024).toFixed(0)} KB</span>
-                            {doc.pageCount > 0 && (
-                              <>
-                                <span>•</span>
-                                <span>{doc.pageCount} pages</span>
-                              </>
-                            )}
-                            {doc.chunkCount > 0 && (
-                              <>
-                                <span>•</span>
-                                <span>{doc.chunkCount} chunks</span>
-                              </>
-                            )}
+                          <div className="flex-1 min-w-0">
+                            <p
+                              className={`truncate text-xs font-semibold ${
+                                isSelected
+                                  ? "text-brand-900 dark:text-brand-200"
+                                  : "text-slate-900 dark:text-white"
+                              }`}
+                              title={doc.originalName}
+                            >
+                              {doc.originalName}
+                            </p>
+
+                            <div className="mt-1 flex items-center gap-1.5 text-[10px] text-slate-500 dark:text-slate-400">
+                              <span>
+                                {(doc.fileSize / 1024).toFixed(0)} KB
+                              </span>
+                              {doc.pageCount > 0 && (
+                                <>
+                                  <span>•</span>
+                                  <span>{doc.pageCount} pgs</span>
+                                </>
+                              )}
+                              {doc.chunkCount > 0 && (
+                                <>
+                                  <span>•</span>
+                                  <span>{doc.chunkCount} chunks</span>
+                                </>
+                              )}
+                            </div>
                           </div>
                         </div>
 
                         {/* Status Badge */}
                         <div className="flex flex-col items-end gap-1">
                           {doc.status === "ready" && (
-                            <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-800">
+                            <span className="inline-flex items-center gap-1 rounded-md bg-emerald-100 dark:bg-emerald-950/60 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/40">
+                              <CheckCircle2 className="h-3 w-3" />
                               Ready
                             </span>
                           )}
                           {doc.status === "processing" && (
-                            <span className="flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">
-                              <span className="inline-block h-2 w-2 animate-spin rounded-full border border-amber-800 border-t-transparent" />
+                            <span className="inline-flex items-center gap-1 rounded-md bg-amber-100 dark:bg-amber-950/60 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800/40">
+                              <span className="inline-block h-2 w-2 animate-spin rounded-full border border-amber-800 dark:border-amber-300 border-t-transparent" />
                               Indexing
                             </span>
                           )}
                           {doc.status === "failed" && (
-                            <span className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-medium text-red-800">
+                            <span className="inline-flex items-center gap-1 rounded-md bg-red-100 dark:bg-red-950/60 px-1.5 py-0.5 text-[10px] font-semibold text-red-800 dark:text-red-300 border border-red-200 dark:border-red-800/40">
+                              <AlertTriangle className="h-3 w-3" />
                               Failed
                             </span>
                           )}
                         </div>
                       </div>
 
-                      {/* Delete Button */}
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDeleteDocument(doc._id, doc.originalName);
-                        }}
-                        className="mt-2 text-[11px] text-slate/70 hover:text-red-600 transition-colors"
-                        title="Delete document"
-                      >
-                        Delete
-                      </button>
+                      {/* Card Action Row */}
+                      <div className="mt-2.5 pt-2 border-t border-slate-100 dark:border-dark-border/50 flex items-center justify-between">
+                        <span className="text-[10px] text-slate-400">
+                          {new Date(doc.createdAt).toLocaleDateString(undefined, {
+                            month: "short",
+                            day: "numeric",
+                          })}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            triggerDeletePrompt(doc);
+                          }}
+                          className="flex items-center gap-1 text-[11px] text-slate-400 hover:text-red-600 dark:hover:text-red-400 transition-colors p-1 rounded hover:bg-red-50 dark:hover:bg-red-950/30"
+                          title="Delete document and its indexed data"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                          <span>Delete</span>
+                        </button>
+                      </div>
                     </div>
                   );
                 })
@@ -381,39 +562,58 @@ export default function Chat() {
           </div>
 
           {/* Active selection summary footer */}
-          <div className="border-t border-line p-3 bg-paper/40 text-xs text-slate">
+          <div className="border-t border-slate-200 dark:border-dark-border p-3.5 bg-slate-50 dark:bg-dark-card text-xs text-slate-500 dark:text-slate-400 shrink-0">
             {activeDoc ? (
-              <p className="truncate">
-                Active: <span className="font-semibold text-ink">{activeDoc.originalName}</span>
-              </p>
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] uppercase tracking-wider font-semibold text-slate-400">
+                  Target
+                </span>
+                <span className="truncate max-w-[180px] font-medium text-slate-900 dark:text-white">
+                  {activeDoc.originalName}
+                </span>
+              </div>
             ) : (
-              <p>Select a document above</p>
+              <p className="text-center text-[11px]">Select a document above</p>
             )}
           </div>
         </aside>
 
-        {/* ================= Chat Area ================= */}
-        <main className="flex-1 flex flex-col bg-paper overflow-hidden">
-          {/* Active Document Top Banner */}
-          <div className="border-b border-line bg-white/70 backdrop-blur-sm px-6 py-2.5 flex items-center justify-between text-xs">
+        {/* Mobile backdrop overlay */}
+        {sidebarOpen && (
+          <div
+            onClick={() => setSidebarOpen(false)}
+            className="fixed inset-0 z-20 bg-black/40 md:hidden backdrop-blur-xs"
+          />
+        )}
+
+        {/* ================= CHAT MAIN AREA ================= */}
+        <main className="flex-1 flex flex-col bg-slate-50 dark:bg-dark-bg overflow-hidden relative">
+          {/* Active Document Top Sub-Banner */}
+          <div className="border-b border-slate-200 dark:border-dark-border bg-white/80 dark:bg-dark-surface/80 backdrop-blur-sm px-6 py-2.5 flex items-center justify-between text-xs shrink-0">
             <div className="flex items-center gap-2">
-              <span className="text-slate">Target Document:</span>
+              <span className="text-slate-500 dark:text-slate-400">Context:</span>
               {activeDoc ? (
-                <span className="font-medium text-ink flex items-center gap-1.5">
-                  <span
-                    className={`inline-block h-2 w-2 rounded-full ${
-                      activeDoc.status === "ready"
-                        ? "bg-emerald-500"
-                        : activeDoc.status === "processing"
-                        ? "bg-amber-500 animate-pulse"
-                        : "bg-red-500"
-                    }`}
-                  />
-                  {activeDoc.originalName}
-                  {activeDoc.status === "processing" && " (processing chunks...)"}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold text-slate-900 dark:text-white">
+                    {activeDoc.originalName}
+                  </span>
+                  {activeDoc.status === "processing" ? (
+                    <span className="inline-flex items-center gap-1 rounded bg-amber-100 dark:bg-amber-950/60 px-2 py-0.5 text-[10px] text-amber-800 dark:text-amber-300 font-medium">
+                      <span className="h-2 w-2 animate-spin rounded-full border border-amber-800 dark:border-amber-300 border-t-transparent" />
+                      Indexing chunks ({activeDoc.chunkCount})
+                    </span>
+                  ) : activeDoc.status === "ready" ? (
+                    <span className="inline-flex items-center gap-1 rounded bg-emerald-100 dark:bg-emerald-950/60 px-2 py-0.5 text-[10px] text-emerald-800 dark:text-emerald-300 font-medium">
+                      Ready for questions
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 rounded bg-red-100 dark:bg-red-950/60 px-2 py-0.5 text-[10px] text-red-800 dark:text-red-300 font-medium">
+                      Indexing Failed
+                    </span>
+                  )}
+                </div>
               ) : (
-                <span className="text-slate/70 italic">None selected</span>
+                <span className="text-slate-400 italic">No document selected</span>
               )}
             </div>
 
@@ -429,39 +629,53 @@ export default function Chat() {
                     },
                   ])
                 }
-                className="text-slate hover:text-ink text-[11px] underline"
+                className="flex items-center gap-1 text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white text-xs transition-colors"
+                title="Reset conversation messages"
               >
-                Clear Chat
+                <RotateCcw className="h-3 w-3" />
+                <span>Clear Chat</span>
               </button>
             )}
           </div>
 
-          {/* Messages Container */}
-          <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+          {/* Messages Feed */}
+          <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-6 space-y-5">
             {messages.map((m, i) => (
               <div
                 key={i}
-                className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
+                className={`flex gap-3 ${
+                  m.role === "user" ? "justify-end" : "justify-start"
+                } animate-fade-in`}
               >
+                {/* Assistant Avatar */}
+                {m.role === "assistant" && (
+                  <div className="h-8 w-8 rounded-xl bg-gradient-to-tr from-brand-600 to-teal-400 text-white flex items-center justify-center shrink-0 shadow-sm mt-1">
+                    <Sparkles className="h-4 w-4" />
+                  </div>
+                )}
+
+                {/* Message Bubble */}
                 <div
-                  className={`max-w-[85%] rounded-lg px-4 py-3 text-sm leading-relaxed shadow-sm ${
+                  className={`max-w-[85%] sm:max-w-2xl rounded-2xl px-5 py-4 text-sm leading-relaxed shadow-sm ${
                     m.role === "user"
-                      ? "bg-accent text-white"
-                      : "border border-line bg-white text-ink"
+                      ? "bg-brand-600 text-white rounded-tr-xs"
+                      : "border border-slate-200 dark:border-dark-border bg-white dark:bg-dark-card text-slate-900 dark:text-dark-text rounded-tl-xs"
                   }`}
                 >
-                  {/* Message Content: Markdown support */}
-                  <div className="prose prose-sm max-w-none text-inherit">
+                  {/* Markdown Content */}
+                  <div className="markdown-body">
                     <ReactMarkdown>{m.text}</ReactMarkdown>
                   </div>
 
-                  {/* Structured Sources Section */}
+                  {/* ================= SOURCES CITATION UI ================= */}
                   {m.sources && m.sources.length > 0 && (
-                    <div className="mt-3 border-t border-line/60 pt-2 text-xs">
-                      <p className="font-semibold text-slate mb-1">
-                        Sources ({m.sources.length}):
-                      </p>
-                      <div className="space-y-1.5">
+                    <div className="mt-4 pt-3 border-t border-slate-200 dark:border-dark-border/80">
+                      <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-500 dark:text-slate-400 mb-2">
+                        <Layers className="h-3.5 w-3.5 text-brand-600 dark:text-brand-400" />
+                        <span>Sources ({m.sources.length})</span>
+                      </div>
+
+                      <div className="space-y-2">
                         {m.sources.map((src, srcIdx) => {
                           const isExpanded =
                             expandedSources[i] && expandedSources[i].has(srcIdx);
@@ -469,31 +683,40 @@ export default function Chat() {
                           return (
                             <div
                               key={srcIdx}
-                              className="rounded border border-line/60 bg-paper/60 p-2 text-slate"
+                              className="rounded-xl border border-slate-200 dark:border-dark-border/80 bg-slate-50 dark:bg-dark-surface/90 p-3 text-xs"
                             >
-                              <div className="flex items-center justify-between font-medium text-ink">
-                                <span>Page {src.page}</span>
-                                {src.score !== null && (
-                                  <span className="text-[11px] text-accentDark font-normal">
-                                    {(src.score * 100).toFixed(1)}% match
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-semibold text-slate-800 dark:text-slate-200">
+                                    Page {src.page}
                                   </span>
+                                  {src.score !== null && (
+                                    <span className="rounded-full bg-brand-100 dark:bg-brand-950/80 px-2 py-0.5 text-[10px] font-semibold text-brand-700 dark:text-brand-300 border border-brand-200 dark:border-brand-800/40">
+                                      {(src.score * 100).toFixed(1)}% match
+                                    </span>
+                                  )}
+                                </div>
+
+                                {src.text && (
+                                  <button
+                                    onClick={() => toggleSnippet(i, srcIdx)}
+                                    className="flex items-center gap-1 text-[11px] font-medium text-brand-600 dark:text-brand-400 hover:underline focus:outline-none"
+                                  >
+                                    <span>
+                                      {isExpanded ? "Hide excerpt" : "View excerpt"}
+                                    </span>
+                                    {isExpanded ? (
+                                      <ChevronUp className="h-3 w-3" />
+                                    ) : (
+                                      <ChevronDown className="h-3 w-3" />
+                                    )}
+                                  </button>
                                 )}
                               </div>
 
-                              {src.text && (
-                                <div className="mt-1">
-                                  <button
-                                    onClick={() => toggleSnippet(i, srcIdx)}
-                                    className="text-[11px] text-accent hover:underline focus:outline-none"
-                                  >
-                                    {isExpanded ? "▲ Hide excerpt" : "▼ View excerpt"}
-                                  </button>
-
-                                  {isExpanded && (
-                                    <p className="mt-1 rounded bg-white p-2 text-[11px] font-mono leading-normal text-slate border border-line whitespace-pre-wrap">
-                                      {src.text}
-                                    </p>
-                                  )}
+                              {isExpanded && src.text && (
+                                <div className="mt-2.5 rounded-lg bg-white dark:bg-dark-card p-3 text-[11px] font-mono leading-relaxed text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-dark-border whitespace-pre-wrap">
+                                  {src.text}
                                 </div>
                               )}
                             </div>
@@ -503,15 +726,55 @@ export default function Chat() {
                     </div>
                   )}
                 </div>
+
+                {/* User Avatar */}
+                {m.role === "user" && (
+                  <div className="h-8 w-8 rounded-xl bg-slate-200 dark:bg-dark-card text-slate-700 dark:text-slate-200 flex items-center justify-center shrink-0 shadow-sm mt-1">
+                    <UserIcon className="h-4 w-4" />
+                  </div>
+                )}
               </div>
             ))}
 
-            {/* Thinking / Generating Bubble */}
+            {/* Thinking / Searching Skeleton State */}
             {sending && (
-              <div className="flex justify-start">
-                <div className="rounded-lg border border-line bg-white px-4 py-3 text-xs text-slate shadow-sm flex items-center gap-2">
-                  <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-accent border-t-transparent" />
-                  <span>Searching document and generating grounded answer...</span>
+              <div className="flex gap-3 justify-start animate-fade-in">
+                <div className="h-8 w-8 rounded-xl bg-gradient-to-tr from-brand-600 to-teal-400 text-white flex items-center justify-center shrink-0 shadow-sm mt-1">
+                  <Sparkles className="h-4 w-4" />
+                </div>
+                <div className="rounded-2xl border border-slate-200 dark:border-dark-border bg-white dark:bg-dark-card px-5 py-4 text-xs text-slate-500 dark:text-slate-400 shadow-sm flex items-center gap-3">
+                  <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-brand-500 border-t-transparent" />
+                  <span>
+                    Searching document embeddings &amp; generating grounded answer...
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Empty Chat State with Example Question Chips */}
+            {messages.length === 1 && activeDoc?.status === "ready" && !sending && (
+              <div className="my-8 max-w-lg mx-auto text-center animate-slide-up">
+                <div className="inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-brand-100 dark:bg-brand-950/60 text-brand-600 dark:text-brand-400 mb-3 shadow-sm">
+                  <HelpCircle className="h-6 w-6" />
+                </div>
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                  Ask anything about your document
+                </h3>
+                <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                  Select an example prompt below or type your own question:
+                </p>
+
+                <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2 text-left">
+                  {exampleQuestions.map((q, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => handleSend(null, q)}
+                      className="rounded-xl border border-slate-200 dark:border-dark-border bg-white dark:bg-dark-card p-3 text-xs font-medium text-slate-700 dark:text-slate-200 hover:border-brand-500 hover:text-brand-600 dark:hover:text-brand-400 hover:bg-brand-50/40 dark:hover:bg-brand-950/20 transition-all text-left shadow-2xs"
+                    >
+                      &ldquo;{q}&rdquo;
+                    </button>
+                  ))}
                 </div>
               </div>
             )}
@@ -519,31 +782,64 @@ export default function Chat() {
             <div ref={bottomRef} />
           </div>
 
-          {/* Chat Input Bar */}
-          <div className="border-t border-line bg-white p-4">
-            {chatError && (
-              <p className="mb-2 text-xs text-red-600 px-1">{chatError}</p>
-            )}
+          {/* ================= COMPOSER / INPUT BAR ================= */}
+          <div className="border-t border-slate-200 dark:border-dark-border bg-white dark:bg-dark-surface p-4 shrink-0">
+            <div className="max-w-4xl mx-auto">
+              {chatError && (
+                <div
+                  role="alert"
+                  className="mb-2 flex items-center gap-2 rounded-lg bg-red-50 dark:bg-red-950/40 px-3 py-2 text-xs text-red-600 dark:text-red-400 border border-red-200 dark:border-red-900/50 animate-fade-in"
+                >
+                  <AlertCircle className="h-4 w-4 shrink-0" />
+                  <span>{chatError}</span>
+                </div>
+              )}
 
-            <form onSubmit={handleSend} className="flex gap-2">
-              <input
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder={inputPlaceholder}
-                disabled={isInputDisabled}
-                className="flex-1 rounded-md border border-line px-3 py-2 text-sm focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent disabled:bg-paper disabled:text-slate/60"
-              />
-              <button
-                type="submit"
-                disabled={isInputDisabled || !input.trim()}
-                className="rounded-md bg-accent px-5 py-2 text-sm font-medium text-white hover:bg-accentDark disabled:opacity-50 transition-colors"
-              >
-                Send
-              </button>
-            </form>
+              <form onSubmit={(e) => handleSend(e)} className="relative flex items-center">
+                <input
+                  ref={textareaRef}
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder={inputPlaceholder}
+                  disabled={isInputDisabled}
+                  className="w-full rounded-2xl border border-slate-200 dark:border-dark-border bg-slate-50/70 dark:bg-dark-card pl-4 pr-14 py-3 text-sm text-slate-900 dark:text-white placeholder-slate-400 focus:border-brand-500 focus:bg-white dark:focus:bg-dark-card focus:outline-none focus:ring-2 focus:ring-brand-500/20 disabled:opacity-60 disabled:cursor-not-allowed transition-all"
+                />
+
+                <button
+                  type="submit"
+                  disabled={isInputDisabled || !input.trim()}
+                  className="absolute right-2 top-2 bottom-2 rounded-xl bg-brand-600 px-3 flex items-center justify-center text-white hover:bg-brand-700 disabled:opacity-40 disabled:hover:bg-brand-600 transition-all focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+                  aria-label="Send message"
+                  title="Send message (Enter)"
+                >
+                  <Send className="h-4 w-4" />
+                </button>
+              </form>
+
+              <div className="mt-2 flex items-center justify-between text-[11px] text-slate-400 dark:text-slate-500 px-2">
+                <span>
+                  Grounded with Qwen2.5 3B &amp; MongoDB Atlas Vector Search
+                </span>
+                <span>Press Enter to send</span>
+              </div>
+            </div>
           </div>
         </main>
       </div>
+
+      {/* ================= DELETE CONFIRMATION MODAL ================= */}
+      <Modal
+        isOpen={Boolean(deleteModalDoc)}
+        onClose={() => setDeleteModalDoc(null)}
+        onConfirm={confirmDeleteDocument}
+        title="Delete document?"
+        message={`Are you sure you want to delete "${deleteModalDoc?.originalName}"? This will permanently remove the document and its indexed vector embeddings.`}
+        confirmText="Delete Document"
+        cancelText="Keep"
+        isDestructive={true}
+        loading={deleting}
+      />
     </div>
   );
 }
